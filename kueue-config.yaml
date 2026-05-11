@@ -1,0 +1,94 @@
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ProvisioningRequestConfig
+metadata:
+  name: dws-prc
+spec:
+  provisioningClassName: queued-provisioning.gke.io
+  parameters:
+    maxRunDurationSeconds: "3600"
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: AdmissionCheck
+metadata:
+  name: dws-check
+spec:
+  controllerName: kueue.x-k8s.io/provisioning-request
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: ProvisioningRequestConfig
+    name: dws-prc
+---
+# Spot flavor — pool gerenciado pelo cluster autoscaler (sem DWS admission check)
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: flavor-spot
+spec:
+  nodeLabels:
+    cloud.google.com/compute-class: "ccc-dws"
+    pool-type: "spot"
+  tolerations:
+  - key: cloud.google.com/gke-spot
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+---
+# On-demand flavor — pool gerenciado pelo DWS via ProvisioningRequest
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: flavor-ondemand
+spec:
+  nodeLabels:
+    cloud.google.com/compute-class: "ccc-dws"
+    pool-type: "ondemand"
+  tolerations:
+  - key: cloud.google.com/gke-queued
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: cluster-queue-dws
+spec:
+  # dws-check só se aplica ao flavor-ondemand (DWS); spot não precisa de admission check
+  admissionChecksStrategy:
+    admissionChecks:
+    - name: dws-check
+      onFlavors: ["flavor-ondemand"]
+  namespaceSelector: {}
+  resourceGroups:
+  - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+    flavors:
+    - name: flavor-spot        # tentado primeiro pelo Kueue (mais barato)
+      resources:
+      - name: "cpu"
+        nominalQuota: 100
+      - name: "memory"
+        nominalQuota: 400Gi
+      - name: "nvidia.com/gpu"
+        nominalQuota: 4
+    - name: flavor-ondemand    # fallback via DWS quando spot esgotado
+      resources:
+      - name: "cpu"
+        nominalQuota: 100
+      - name: "memory"
+        nominalQuota: 400Gi
+      - name: "nvidia.com/gpu"
+        nominalQuota: 4
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: local-queue-dws
+  namespace: default
+spec:
+  clusterQueue: cluster-queue-dws

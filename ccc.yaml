@@ -1,0 +1,10 @@
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: ccc-dws
+spec:
+  nodePoolAutoCreation:
+    enabled: true
+  priorities:
+  - nodepools: [gpu-dws-spot-pool]   # 1st: spot  (cheaper, ~60% off) — skipped if unavailable
+  - nodepools: [gpu-dws-pool]        # 2nd: on-demand T4 (fallback)

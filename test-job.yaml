@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: job-dws-test
+  namespace: default
+  labels:
+    kueue.x-k8s.io/queue-name: local-queue-dws
+spec:
+  parallelism: 1
+  completions: 1
+  template:
+    spec:
+      containers:
+      - name: dummy-ml-workload
+        image: ubuntu
+        command: ["sleep", "120"]
+        resources:
+          requests:
+            cpu: "1"
+            memory: "1Gi"
+            nvidia.com/gpu: "1"
+          limits:
+            nvidia.com/gpu: "1"
+      tolerations:
+      - key: cloud.google.com/gke-spot
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      - key: cloud.google.com/gke-queued
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      restartPolicy: Never
