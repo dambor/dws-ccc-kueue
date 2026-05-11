@@ -124,11 +124,11 @@ done
 echo "[6/6] Deploying CCC + Kueue + DWS resources..."
 kubectl apply -f ccc.yaml
 kubectl apply -f kueue-config.yaml
-kubectl apply -f test-job.yaml
 
 echo ""
 echo "Deployment complete!"
 kubectl get computeclass ccc-dws
 kubectl get clusterqueue cluster-queue-dws
 kubectl get localqueue local-queue-dws
-kubectl get job job-dws-test
+echo ""
+echo "Run ./test.sh to execute the end-to-end integration test."
