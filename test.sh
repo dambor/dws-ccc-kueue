@@ -228,6 +228,12 @@ watch_field "Job completed" \
   "kubectl get job job-dws-test -n default -o jsonpath='{.status.conditions[?(@.type==\"Complete\")].status}'" \
   "True" 600
 
+kubectl delete job job-dws-test --ignore-not-found=true &>/dev/null
+trap - EXIT  # cleanup already done
+
+spin_until "GPU node scaled down to 0" \
+  "kubectl get nodes --no-headers | grep -qv 'gpu-dws'" 300
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

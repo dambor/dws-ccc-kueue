@@ -45,6 +45,7 @@ gcloud container clusters create "${CLUSTER_NAME}" \
   --num-nodes=1 \
   --machine-type=e2-standard-4 \
   --workload-pool="${PROJECT_ID}.svc.id.goog" \
+  --autoscaling-profile=optimize-utilization \
   --no-enable-basic-auth
 
 echo "Fetching cluster credentials..."
