@@ -98,6 +98,12 @@ kind: ClusterQueue
 metadata:
   name: cluster-queue-dws
 spec:
+  # Try the next flavor instead of borrowing/preempting in the current one.
+  # Hypothesis (to be tested): this also makes Kueue cascade past a flavor
+  # whose admission check returns failure (e.g., check-capacity NoCapacity).
+  flavorFungibility:
+    whenCanBorrow: TryNextFlavor
+    whenCanPreempt: TryNextFlavor
   # Per-flavor admission checks:
   #   flavor-flex-warm  → check-capacity (no provisioning, succeeds only if warm)
   #   flavor-ondemand   → dws-check (queued-provisioning, provisions cold capacity)
