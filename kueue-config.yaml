@@ -7,6 +7,15 @@ spec:
   parameters:
     maxRunDurationSeconds: "3600"
 ---
+# OSS class supported on GKE: checks if existing capacity satisfies the request,
+# without provisioning new nodes. Returns "no capacity" if pool is cold/empty.
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ProvisioningRequestConfig
+metadata:
+  name: check-capacity-prc
+spec:
+  provisioningClassName: check-capacity.autoscaling.x-k8s.io
+---
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: AdmissionCheck
 metadata:
@@ -17,6 +26,17 @@ spec:
     apiGroup: kueue.x-k8s.io
     kind: ProvisioningRequestConfig
     name: dws-prc
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: AdmissionCheck
+metadata:
+  name: check-capacity-check
+spec:
+  controllerName: kueue.x-k8s.io/provisioning-request
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: ProvisioningRequestConfig
+    name: check-capacity-prc
 ---
 # Spot flavor — pool gerenciado pelo cluster autoscaler (sem DWS admission check)
 apiVersion: kueue.x-k8s.io/v1beta1
@@ -36,7 +56,26 @@ spec:
     operator: Exists
     effect: NoSchedule
 ---
-# On-demand flavor — pool gerenciado pelo DWS via ProvisioningRequest
+# Flex-warm flavor — same DWS pool as flavor-ondemand, but uses check-capacity
+# admission check. Admits only if pool has existing warm capacity (no new provisioning).
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: flavor-flex-warm
+spec:
+  nodeLabels:
+    cloud.google.com/compute-class: "ccc-dws"
+    pool-type: "ondemand"
+  tolerations:
+  - key: cloud.google.com/gke-queued
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+---
+# Flex-cold flavor — pool gerenciado pelo DWS via ProvisioningRequest (queued-provisioning)
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: ResourceFlavor
 metadata:
@@ -59,16 +98,20 @@ kind: ClusterQueue
 metadata:
   name: cluster-queue-dws
 spec:
-  # dws-check só se aplica ao flavor-ondemand (DWS); spot não precisa de admission check
+  # Per-flavor admission checks:
+  #   flavor-flex-warm  → check-capacity (no provisioning, succeeds only if warm)
+  #   flavor-ondemand   → dws-check (queued-provisioning, provisions cold capacity)
   admissionChecksStrategy:
     admissionChecks:
+    - name: check-capacity-check
+      onFlavors: ["flavor-flex-warm"]
     - name: dws-check
       onFlavors: ["flavor-ondemand"]
   namespaceSelector: {}
   resourceGroups:
   - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
     flavors:
-    - name: flavor-spot        # tentado primeiro pelo Kueue (mais barato)
+    - name: flavor-spot         # 1st: spot (cheapest)
       resources:
       - name: "cpu"
         nominalQuota: 100
@@ -76,7 +119,15 @@ spec:
         nominalQuota: 400Gi
       - name: "nvidia.com/gpu"
         nominalQuota: 4
-    - name: flavor-ondemand    # fallback via DWS quando spot esgotado
+    - name: flavor-flex-warm    # 2nd: reuse existing DWS-provisioned node if warm
+      resources:
+      - name: "cpu"
+        nominalQuota: 100
+      - name: "memory"
+        nominalQuota: 400Gi
+      - name: "nvidia.com/gpu"
+        nominalQuota: 4
+    - name: flavor-ondemand     # 3rd: cold-start via DWS queued provisioning
       resources:
       - name: "cpu"
         nominalQuota: 100
