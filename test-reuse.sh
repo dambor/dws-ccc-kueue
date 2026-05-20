@@ -1,6 +1,18 @@
 #!/bin/bash
 set -e
 
+# Usage: ./test-reuse.sh [clean]
+#   (no args) → run the 2-job warm-reuse experiment
+#   clean    → delete leftover jobs/workloads/provisioning requests and exit
+if [[ "${1:-}" == "clean" || "${1:-}" == "--clean" || "${1:-}" == "cleanup" ]]; then
+  echo "Cleaning up test-reuse resources..."
+  kubectl delete job job-reuse-1 job-reuse-2 --ignore-not-found=true
+  kubectl delete workload -n default -l kueue.x-k8s.io/queue-name=local-queue-dws --ignore-not-found=true 2>/dev/null || true
+  kubectl get provisioningrequest -n default -o name 2>/dev/null | grep -E 'job-reuse-[12]' | xargs -r kubectl delete -n default --ignore-not-found=true
+  echo "Done."
+  exit 0
+fi
+
 # ---------------------------------------------------------------------------
 # Experiment: warm-node reuse via check-capacity admission check
 #
@@ -53,6 +65,15 @@ spin_until() {
 }
 
 cleanup() {
+  local rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo ""
+    warn "Script failed (exit $rc) — leaving jobs/workloads/PRs in place for diagnostics."
+    echo -e "  ${DIM}Inspect:    kubectl get workload,provisioningrequest -n default${RESET}"
+    echo -e "  ${DIM}Describe:   kubectl describe workload -n default${RESET}"
+    echo -e "  ${DIM}Manual gc:  kubectl delete job job-reuse-1 job-reuse-2 --ignore-not-found=true${RESET}"
+    return
+  fi
   echo ""
   step "Cleaning up test jobs..."
   kubectl delete job job-reuse-1 job-reuse-2 --ignore-not-found=true &>/dev/null
