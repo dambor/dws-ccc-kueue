@@ -4,7 +4,7 @@ set -e
 # Usage: ./test-flex-pr.sh [clean]
 #
 # Experiment: Kueue + ProvisioningRequest + node reuse on a Flex Start non-queued
-# pool. Uses provisioningClassName: best-effort-atomic.autoscaling.x-k8s.io.
+# pool. Uses provisioningClassName: best-effort-atomic-scale-up.autoscaling.x-k8s.io.
 #
 # Goal: discover whether this PR class preserves FSNQ's node-recycling lifecycle.
 # Submits two jobs to local-queue-flex-pr (separate from the main demo queue)

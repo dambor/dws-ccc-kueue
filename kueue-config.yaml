@@ -124,15 +124,16 @@ spec:
 ---
 # ─────────────────────────────────────────────────────────────────────────────
 # Experiment: Kueue + ProvisioningRequest + reuse on the FSNQ pool.
-# Uses provisioningClassName: best-effort-atomic.autoscaling.x-k8s.io.
-# Tests whether this PR class preserves the FSNQ node-recycling lifecycle.
+# Uses provisioningClassName: best-effort-atomic-scale-up.autoscaling.x-k8s.io
+# (per cluster-autoscaler FAQ: checks existing capacity first, then scales up
+# atomically if needed — should preserve FSNQ node-recycling on warm hits).
 # ─────────────────────────────────────────────────────────────────────────────
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: ProvisioningRequestConfig
 metadata:
   name: best-effort-atomic-prc
 spec:
-  provisioningClassName: best-effort-atomic.autoscaling.x-k8s.io
+  provisioningClassName: best-effort-atomic-scale-up.autoscaling.x-k8s.io
 ---
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: AdmissionCheck
