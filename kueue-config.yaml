@@ -121,3 +121,73 @@ metadata:
   namespace: default
 spec:
   clusterQueue: cluster-queue-dws
+---
+# ─────────────────────────────────────────────────────────────────────────────
+# Experiment: Kueue + ProvisioningRequest + reuse on the FSNQ pool.
+# Uses provisioningClassName: best-effort-atomic.autoscaling.x-k8s.io.
+# Tests whether this PR class preserves the FSNQ node-recycling lifecycle.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ProvisioningRequestConfig
+metadata:
+  name: best-effort-atomic-prc
+spec:
+  provisioningClassName: best-effort-atomic.autoscaling.x-k8s.io
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: AdmissionCheck
+metadata:
+  name: best-effort-atomic-check
+spec:
+  controllerName: kueue.x-k8s.io/provisioning-request
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: ProvisioningRequestConfig
+    name: best-effort-atomic-prc
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: flavor-flex-pr
+spec:
+  nodeLabels:
+    cloud.google.com/compute-class: "ccc-dws"
+    pool-type: "flex"
+  tolerations:
+  - key: cloud.google.com/gke-flex-start
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: cluster-queue-flex-pr
+spec:
+  admissionChecksStrategy:
+    admissionChecks:
+    - name: best-effort-atomic-check
+      onFlavors: ["flavor-flex-pr"]
+  namespaceSelector: {}
+  resourceGroups:
+  - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+    flavors:
+    - name: flavor-flex-pr
+      resources:
+      - name: "cpu"
+        nominalQuota: 100
+      - name: "memory"
+        nominalQuota: 400Gi
+      - name: "nvidia.com/gpu"
+        nominalQuota: 2
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: local-queue-flex-pr
+  namespace: default
+spec:
+  clusterQueue: cluster-queue-flex-pr
