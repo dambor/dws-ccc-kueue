@@ -6,5 +6,6 @@ spec:
   nodePoolAutoCreation:
     enabled: true
   priorities:
-  - nodepools: [gpu-dws-spot-pool]   # 1st: spot  (cheaper, ~60% off) — skipped if unavailable
-  - nodepools: [gpu-dws-pool]        # 2nd: on-demand T4 (fallback)
+  - nodepools: [gpu-dws-spot-pool]   # 1st: spot (cheapest, preemptible)
+  - nodepools: [gpu-dws-flex-pool]   # 2nd: DWS Flex non-queued (reuse-capable)
+  - nodepools: [gpu-dws-pool]        # 3rd: DWS Flex + queued (gang-scheduling, no reuse)

@@ -182,7 +182,7 @@ NODES_BEFORE=$(kubectl get nodes --no-headers | wc -l | tr -d ' ')
 echo -e "  ${DIM}Nodes before: ${NODES_BEFORE}${RESET}"
 
 if [[ "${FLAVOR}" == "flavor-ondemand" ]]; then
-  # DWS path: wait for ProvisioningRequest to be accepted and provisioned
+  # DWS queued path: wait for ProvisioningRequest to be accepted and provisioned
   spin_until "ProvisioningRequest created by Kueue" \
     "kubectl get provisioningrequest -n default | grep -q 'job-dws-test'" 60
 
@@ -196,6 +196,9 @@ if [[ "${FLAVOR}" == "flavor-ondemand" ]]; then
   watch_field "DWS provisioned GPU node" \
     "kubectl get provisioningrequest ${PR_NAME} -n default -o jsonpath='{.status.conditions[?(@.type==\"Provisioned\")].status}'" \
     "True" 900
+elif [[ "${FLAVOR}" == "flavor-flex" ]]; then
+  # DWS Flex non-queued: autoscaler provisions via --flex-start, supports node reuse
+  ok "DWS Flex (non-queued) selected — autoscaler will provision, supports warm reuse"
 else
   # Spot path: cluster autoscaler provisions the node
   ok "Spot flavor selected — cluster autoscaler will provision node"

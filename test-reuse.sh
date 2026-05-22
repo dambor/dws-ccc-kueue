@@ -2,31 +2,23 @@
 set -e
 
 # Usage: ./test-reuse.sh [clean]
-#   (no args) → run the 2-job warm-reuse experiment
-#   clean    → delete leftover jobs/workloads/provisioning requests and exit
+#   (no args) → submit two jobs back-to-back on the non-queued Flex pool;
+#               verify that job 2 lands on the SAME node as job 1 (reuse).
+#   clean    → delete leftover jobs/workloads/PRs and exit.
+#
+# Why this test targets flavor-flex specifically:
+#   GKE Flex Start has two modes:
+#     • non-queued (--flex-start)              → nodes RECYCLED across workloads ✔
+#     • queued    (--flex-start --enable-queued-provisioning) → no reuse, PR-per-workload
+#   This script forces pods onto pool-type=flex via nodeSelector to demo reuse.
+
 if [[ "${1:-}" == "clean" || "${1:-}" == "--clean" || "${1:-}" == "cleanup" ]]; then
   echo "Cleaning up test-reuse resources..."
   kubectl delete job job-reuse-1 job-reuse-2 --ignore-not-found=true
-  kubectl delete workload -n default -l kueue.x-k8s.io/queue-name=local-queue-dws --ignore-not-found=true 2>/dev/null || true
   kubectl get provisioningrequest -n default -o name 2>/dev/null | grep -E 'job-reuse-[12]' | xargs -r kubectl delete -n default --ignore-not-found=true
   echo "Done."
   exit 0
 fi
-
-# ---------------------------------------------------------------------------
-# Experiment: warm-node reuse via check-capacity admission check
-#
-# Hypothesis: with two ResourceFlavors on the same DWS pool —
-#   flavor-flex-warm  (check-capacity admission)
-#   flavor-ondemand   (queued-provisioning admission)
-# — Kueue should admit a *second* job (submitted while the first job's node
-# is still warm) to flavor-flex-warm, avoiding a new ProvisioningRequest.
-#
-# This script submits two jobs sequentially and reports:
-#   • which flavor admitted each
-#   • which node each ran on (same node = reuse worked)
-#   • whether a new ProvisioningRequest was created for the second job
-# ---------------------------------------------------------------------------
 
 RESET="\033[0m"; BOLD="\033[1m"; DIM="\033[2m"
 GREEN="\033[32m"; YELLOW="\033[33m"; CYAN="\033[36m"; RED="\033[31m"; WHITE="\033[97m"
@@ -68,10 +60,9 @@ cleanup() {
   local rc=$?
   if [[ $rc -ne 0 ]]; then
     echo ""
-    warn "Script failed (exit $rc) — leaving jobs/workloads/PRs in place for diagnostics."
-    echo -e "  ${DIM}Inspect:    kubectl get workload,provisioningrequest -n default${RESET}"
-    echo -e "  ${DIM}Describe:   kubectl describe workload -n default${RESET}"
-    echo -e "  ${DIM}Manual gc:  kubectl delete job job-reuse-1 job-reuse-2 --ignore-not-found=true${RESET}"
+    warn "Script failed (exit $rc) — leaving jobs/workloads in place for diagnostics."
+    echo -e "  ${DIM}Inspect:    kubectl get workload,job,pod -n default${RESET}"
+    echo -e "  ${DIM}Manual gc:  ./test-reuse.sh clean${RESET}"
     return
   fi
   echo ""
@@ -96,7 +87,7 @@ spec:
   template:
     spec:
       nodeSelector:
-        pool-type: ondemand
+        pool-type: flex
       containers:
       - name: dummy-ml-workload
         image: ubuntu
@@ -109,7 +100,7 @@ spec:
           limits:
             nvidia.com/gpu: "1"
       tolerations:
-      - key: cloud.google.com/gke-queued
+      - key: cloud.google.com/gke-flex-start
         operator: Equal
         value: "true"
         effect: NoSchedule
@@ -121,7 +112,7 @@ EOF
 }
 
 observe_job() {
-  local job_name="$1" label="$2" pr_timeout="${3:-900}"
+  local job_name="$1" label="$2" admit_timeout="${3:-900}"
 
   spin_until "${label}: workload created" \
     "kubectl get workload -n default | grep -q '${job_name}'" 60
@@ -138,58 +129,50 @@ observe_job() {
     -o jsonpath='{.status.admission.podSetAssignments[0].flavors.cpu}' 2>/dev/null || echo unknown)
   echo -e "  ${BOLD}${ARROW} Flavor admitted: ${BG_YELLOW}${WHITE} ${flavor} ${RESET}"
 
-  local pr_count
-  pr_count=$(kubectl get provisioningrequest -n default --no-headers 2>/dev/null | grep -c "${job_name}" || true)
-  echo -e "  ${DIM}ProvisioningRequests for this job: ${pr_count}${RESET}"
-
-  if [[ "${pr_count}" -gt 0 ]]; then
-    kubectl get provisioningrequest -n default --no-headers | grep "${job_name}" | \
-      awk '{printf "    %s   %s\n", $1, $2}'
-  fi
-
-  spin_until "${label}: pod scheduled" \
-    "kubectl get pods -n default -l job-name=${job_name} -o jsonpath='{.items[0].spec.nodeName}' | grep -q ." 600
+  spin_until "${label}: pod scheduled to a node" \
+    "kubectl get pods -n default -l job-name=${job_name} -o jsonpath='{.items[0].spec.nodeName}' | grep -q ." "${admit_timeout}"
 
   local node
   node=$(kubectl get pods -n default -l job-name="${job_name}" \
     -o jsonpath='{.items[0].spec.nodeName}')
-  echo -e "  ${BOLD}${ARROW} Pod node: ${BG_YELLOW}${WHITE} ${node} ${RESET}"
+  echo -e "  ${BOLD}${ARROW} Pod node:        ${BG_YELLOW}${WHITE} ${node} ${RESET}"
 
   spin_until "${label}: job completed" \
-    "kubectl get job ${job_name} -n default -o jsonpath='{.status.conditions[?(@.type==\"Complete\")].status}' | grep -q True" "${pr_timeout}"
+    "kubectl get job ${job_name} -n default -o jsonpath='{.status.conditions[?(@.type==\"Complete\")].status}' | grep -q True" 600
 
-  # Export observations
   declare -g "${label}_FLAVOR=${flavor}"
   declare -g "${label}_NODE=${node}"
-  declare -g "${label}_PR_COUNT=${pr_count}"
 }
 
 # ---------------------------------------------------------------------------
 clear
 echo ""
 echo -e "${BOLD}${CYAN}"
-echo "  ╔══════════════════════════════════════════════════════╗"
-echo "  ║   Experiment: warm reuse via check-capacity flavor   ║"
-echo "  ╚══════════════════════════════════════════════════════╝"
+echo "  ╔══════════════════════════════════════════════════════════╗"
+echo "  ║   Experiment: warm node reuse on DWS Flex (non-queued)   ║"
+echo "  ╚══════════════════════════════════════════════════════════╝"
 echo -e "${RESET}"
+echo -e "  ${DIM}Both jobs target pool-type=flex (DWS Flex Start non-queued).${RESET}"
+echo -e "  ${DIM}GKE docs: 'Flex-start supports node recycling, while Flex-start${RESET}"
+echo -e "  ${DIM}with queued provisioning does not.'${RESET}"
 
 step "Clearing any prior test workloads..."
 kubectl delete job job-reuse-1 job-reuse-2 --ignore-not-found=true &>/dev/null
 sleep 3
 
 # ---------------------------------------------------------------------------
-header "Job 1 — cold-start (expect flavor-ondemand, new PR, ~30-120s)"
+header "Job 1 — cold start on Flex pool (provisions a new node)"
 submit_job job-reuse-1
 ok "Submitted job-reuse-1"
 observe_job job-reuse-1 JOB1
 
 # ---------------------------------------------------------------------------
-header "Brief pause — node should remain warm (balanced profile, ~10 min)"
+header "Brief pause — node stays warm via 'balanced' autoscaling profile (~10 min idle)"
 step "Waiting 15s before submitting job 2..."
 sleep 15
 
 # ---------------------------------------------------------------------------
-header "Job 2 — within warm window (expect flavor-flex-warm, NO new PR)"
+header "Job 2 — should land on the SAME node (reuse)"
 submit_job job-reuse-2
 ok "Submitted job-reuse-2"
 observe_job job-reuse-2 JOB2 300
@@ -199,34 +182,24 @@ header "Findings"
 
 echo ""
 echo -e "  ${BOLD}Job 1:${RESET}"
-echo -e "    Flavor:           ${JOB1_FLAVOR}"
-echo -e "    Node:             ${JOB1_NODE}"
-echo -e "    PR count:         ${JOB1_PR_COUNT}"
+echo -e "    Flavor:  ${JOB1_FLAVOR}"
+echo -e "    Node:    ${JOB1_NODE}"
 echo ""
 echo -e "  ${BOLD}Job 2:${RESET}"
-echo -e "    Flavor:           ${JOB2_FLAVOR}"
-echo -e "    Node:             ${JOB2_NODE}"
-echo -e "    PR count:         ${JOB2_PR_COUNT}"
+echo -e "    Flavor:  ${JOB2_FLAVOR}"
+echo -e "    Node:    ${JOB2_NODE}"
 echo ""
 
-VERDICT=""
-if [[ "${JOB2_FLAVOR}" == "flavor-flex-warm" ]]; then
-  VERDICT="REUSE WORKS — Kueue cascaded check-capacity → admitted onto warm node"
-  COLOR="${BG_GREEN}"
-elif [[ "${JOB2_FLAVOR}" == "flavor-ondemand" && "${JOB2_NODE}" == "${JOB1_NODE}" ]]; then
-  VERDICT="PARTIAL — flex-warm was skipped, but queued-prov reused the warm node anyway"
-  COLOR="${BG_YELLOW}"
-elif [[ "${JOB2_FLAVOR}" == "flavor-ondemand" && "${JOB2_NODE}" != "${JOB1_NODE}" ]]; then
-  VERDICT="REUSE FAILS — flex-warm did not admit, queued-prov provisioned new node"
-  COLOR="${BG_RED}"
+if [[ "${JOB1_NODE}" == "${JOB2_NODE}" && -n "${JOB1_NODE}" ]]; then
+  echo -e "  ${BOLD}${BG_GREEN}${WHITE}  REUSE WORKS — Job 2 ran on the same node as Job 1  ${RESET}"
 else
-  VERDICT="INCONCLUSIVE — see flavor/node values above"
-  COLOR="${BG_YELLOW}"
+  echo -e "  ${BOLD}${BG_RED}${WHITE}  REUSE FAILED — Job 2 got a different node (${JOB2_NODE} ≠ ${JOB1_NODE})  ${RESET}"
+  echo -e "  ${DIM}Check: did the autoscaler scale down job 1's node before job 2 arrived?${RESET}"
+  echo -e "  ${DIM}Check: --autoscaling-profile=balanced should give ~10 min idle window.${RESET}"
 fi
 
-echo -e "  ${BOLD}${COLOR}${WHITE}  ${VERDICT}  ${RESET}"
 echo ""
-echo -e "  ${DIM}All ProvisioningRequests in this run:${RESET}"
-kubectl get provisioningrequest -n default --no-headers 2>/dev/null | \
-  awk '{printf "    %-40s %s\n", $1, $2}' || echo "    (none)"
+echo -e "  ${DIM}Cluster nodes in the flex pool:${RESET}"
+kubectl get nodes -l pool-type=flex --no-headers 2>/dev/null | \
+  awk '{printf "    %s   age: %s\n", $1, $4}' || echo "    (none)"
 echo ""

@@ -7,15 +7,6 @@ spec:
   parameters:
     maxRunDurationSeconds: "3600"
 ---
-# OSS class supported on GKE: checks if existing capacity satisfies the request,
-# without provisioning new nodes. Returns "no capacity" if pool is cold/empty.
-apiVersion: kueue.x-k8s.io/v1beta1
-kind: ProvisioningRequestConfig
-metadata:
-  name: check-capacity-prc
-spec:
-  provisioningClassName: check-capacity.autoscaling.x-k8s.io
----
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: AdmissionCheck
 metadata:
@@ -27,18 +18,7 @@ spec:
     kind: ProvisioningRequestConfig
     name: dws-prc
 ---
-apiVersion: kueue.x-k8s.io/v1beta1
-kind: AdmissionCheck
-metadata:
-  name: check-capacity-check
-spec:
-  controllerName: kueue.x-k8s.io/provisioning-request
-  parameters:
-    apiGroup: kueue.x-k8s.io
-    kind: ProvisioningRequestConfig
-    name: check-capacity-prc
----
-# Spot flavor — pool gerenciado pelo cluster autoscaler (sem DWS admission check)
+# Spot flavor — pool gerenciado pelo cluster autoscaler (sem admission check)
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: ResourceFlavor
 metadata:
@@ -56,18 +36,18 @@ spec:
     operator: Exists
     effect: NoSchedule
 ---
-# Flex-warm flavor — same DWS pool as flavor-ondemand, but uses check-capacity
-# admission check. Admits only if pool has existing warm capacity (no new provisioning).
+# Flex flavor (NON-queued DWS) — pool gerenciado pelo cluster autoscaler com
+# Flex Start. Nós são RECICLADOS entre workloads (warm reuse). Sem admission check.
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: ResourceFlavor
 metadata:
-  name: flavor-flex-warm
+  name: flavor-flex
 spec:
   nodeLabels:
     cloud.google.com/compute-class: "ccc-dws"
-    pool-type: "ondemand"
+    pool-type: "flex"
   tolerations:
-  - key: cloud.google.com/gke-queued
+  - key: cloud.google.com/gke-flex-start
     operator: Equal
     value: "true"
     effect: NoSchedule
@@ -75,7 +55,8 @@ spec:
     operator: Exists
     effect: NoSchedule
 ---
-# Flex-cold flavor — pool gerenciado pelo DWS via ProvisioningRequest (queued-provisioning)
+# On-demand flavor (QUEUED DWS) — pool gerenciado pelo DWS via ProvisioningRequest.
+# Gang-scheduling atômico, mas SEM reuso entre workloads (PR per-workload).
 apiVersion: kueue.x-k8s.io/v1beta1
 kind: ResourceFlavor
 metadata:
@@ -98,19 +79,10 @@ kind: ClusterQueue
 metadata:
   name: cluster-queue-dws
 spec:
-  # Try the next flavor instead of borrowing/preempting in the current one.
-  # Hypothesis (to be tested): this also makes Kueue cascade past a flavor
-  # whose admission check returns failure (e.g., check-capacity NoCapacity).
-  flavorFungibility:
-    whenCanBorrow: TryNextFlavor
-    whenCanPreempt: TryNextFlavor
-  # Per-flavor admission checks:
-  #   flavor-flex-warm  → check-capacity (no provisioning, succeeds only if warm)
-  #   flavor-ondemand   → dws-check (queued-provisioning, provisions cold capacity)
+  # dws-check só se aplica ao flavor-ondemand (DWS queued).
+  # flavor-flex (non-queued) e flavor-spot não precisam de PR.
   admissionChecksStrategy:
     admissionChecks:
-    - name: check-capacity-check
-      onFlavors: ["flavor-flex-warm"]
     - name: dws-check
       onFlavors: ["flavor-ondemand"]
   namespaceSelector: {}
@@ -125,7 +97,7 @@ spec:
         nominalQuota: 400Gi
       - name: "nvidia.com/gpu"
         nominalQuota: 4
-    - name: flavor-flex-warm    # 2nd: reuse existing DWS-provisioned node if warm
+    - name: flavor-flex         # 2nd: DWS Flex non-queued (reuse-capable)
       resources:
       - name: "cpu"
         nominalQuota: 100
@@ -133,7 +105,7 @@ spec:
         nominalQuota: 400Gi
       - name: "nvidia.com/gpu"
         nominalQuota: 4
-    - name: flavor-ondemand     # 3rd: cold-start via DWS queued provisioning
+    - name: flavor-ondemand     # 3rd: DWS Flex + queued (gang-scheduling fallback)
       resources:
       - name: "cpu"
         nominalQuota: 100

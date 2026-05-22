@@ -26,6 +26,10 @@ spec:
         operator: Equal
         value: "true"
         effect: NoSchedule
+      - key: cloud.google.com/gke-flex-start
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
       - key: cloud.google.com/gke-queued
         operator: Equal
         value: "true"

@@ -74,7 +74,26 @@ gcloud container node-pools create gpu-dws-spot-pool \
   --node-locations="${GPU_ZONES}" \
   --node-labels=cloud.google.com/compute-class=ccc-dws,pool-type=spot
 
-# On-demand pool — CCC prioridade 2; DWS queued provisioning garante capacidade
+# Flex-start (NON-queued) pool — CCC prioridade 2; DWS Flex pricing + node recycling
+# across workloads (supports reuse). No ProvisioningRequest, no gang-scheduling.
+gcloud container node-pools create gpu-dws-flex-pool \
+  --cluster="${CLUSTER_NAME}" \
+  --location="${REGION}" \
+  --project="${PROJECT_ID}" \
+  --machine-type="${MACHINE_TYPE}" \
+  --accelerator="type=${GPU_TYPE},count=1,gpu-driver-version=latest" \
+  --flex-start \
+  --num-nodes=0 \
+  --enable-autoscaling \
+  --total-min-nodes=0 \
+  --total-max-nodes=2 \
+  --location-policy=ANY \
+  --reservation-affinity=none \
+  --node-locations="${GPU_ZONES}" \
+  --node-labels=cloud.google.com/compute-class=ccc-dws,pool-type=flex
+
+# On-demand pool — CCC prioridade 3; DWS Flex + queued provisioning para gang-scheduling
+# (multi-node atomic). NÃO reusa nós entre workloads (PR per-workload).
 gcloud container node-pools create gpu-dws-pool \
   --cluster="${CLUSTER_NAME}" \
   --location="${REGION}" \
