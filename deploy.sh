@@ -4,7 +4,7 @@ set -e
 PROJECT_ID=${PROJECT_ID:-$(gcloud config get-value project)}
 CLUSTER_NAME=${CLUSTER_NAME:-"dws-ccc-kueue-cluster"}
 REGION=${REGION:-"us-central1"}
-KUEUE_VERSION=${KUEUE_VERSION:-"v0.10.0"}
+KUEUE_VERSION=${KUEUE_VERSION:-"v0.18.0"}
 GPU_TYPE=${GPU_TYPE:-"nvidia-tesla-t4"}
 MACHINE_TYPE=${MACHINE_TYPE:-"n1-standard-4"}
 GPU_ZONES=${GPU_ZONES:-"us-central1-a,us-central1-b,us-central1-c,us-central1-f"}
@@ -46,7 +46,11 @@ gcloud container clusters create "${CLUSTER_NAME}" \
   --machine-type=e2-standard-4 \
   --workload-pool="${PROJECT_ID}.svc.id.goog" \
   --autoscaling-profile=balanced \
-  --no-enable-basic-auth
+  --no-enable-basic-auth \
+  --enable-private-nodes \
+  --enable-ip-alias \
+  --master-ipv4-cidr=172.16.0.0/28 \
+  --enable-private-endpoint
 
 echo "Fetching cluster credentials..."
 gcloud container clusters get-credentials "${CLUSTER_NAME}" \
@@ -112,14 +116,18 @@ gcloud container node-pools create gpu-dws-pool \
 # 5. Kueue
 # ---------------------------------------------------------------------------
 echo "[4/6] Installing Kueue ${KUEUE_VERSION}..."
-kubectl apply --server-side -f \
-  "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
+
+kubectl apply --server-side --validate=false -f \
+  "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml" 
 
 echo "Waiting for Kueue controller to be ready (up to 5 min)..."
 kubectl wait --for=condition=Available \
   deployment/kueue-controller-manager \
   -n kueue-system \
   --timeout=300s
+
+echo "Giving the API server 5 seconds to register CRDs..."
+sleep 5
 
 # ---------------------------------------------------------------------------
 # 6. Verify CRDs
