@@ -1,0 +1,124 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario: "Stop Trashing Nodes" — atomic provisioning + node reuse via a
+# TAS-enabled flavor fallback (Kueue Topology Aware Scheduling).
+#
+# Both flavors point at the SAME queued-provisioning pool (gpu-dws-pool).
+#   • regular-flavor — no admission check. If idle/warm nodes already exist,
+#     Kueue's TAS cache sees them and admits the workload INSTANTLY (no PR).
+#   • dws-flavor     — backed by a queued-provisioning ProvisioningRequest.
+#     Used only when the TAS check for regular-flavor fails (empty cluster),
+#     triggering an atomic DWS scale-up.
+#
+# Because EVERY flavor in cluster-queue-tas is TAS-enabled (topologyName set),
+# the ClusterQueue is "TAS-only" and Kueue implies TAS for every workload —
+# jobs need NO topology annotation (see flavorassigner.isTASImplied).
+#
+# Requires Kueue >= v0.14 (TopologyAwareScheduling is beta/on-by-default) and
+# the v1beta2 API (podSetUpdates, ResourceFlavor.topologyName). deploy.sh pins
+# v0.18.0, which satisfies both.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: Topology
+metadata:
+  name: node-topology
+spec:
+  # Node-level reuse only needs the hostname level.
+  levels:
+  - nodeLabel: "kubernetes.io/hostname"
+---
+# Preferred flavor: plain scheduling against the DWS pool. No PR — if a warm
+# node is in the TAS cache, the workload admits immediately and reuses it.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: regular-flavor
+spec:
+  nodeLabels:
+    cloud.google.com/gke-nodepool: "gpu-dws-pool"
+  topologyName: node-topology
+  # NOTE: no tolerations here on purpose. Kueue's TAS combines a podset's own
+  # tolerations with the flavor's, then excludes nodes whose taints aren't
+  # tolerated (tas_flavor_snapshot: FindMatchingUntoleratedTaint). Keeping the
+  # flavor toleration-free makes the JOB's cloud.google.com/gke-queued
+  # toleration the opt-in switch for reusing warm queued nodes.
+---
+# Fallback flavor: same pool, but gated by a queued-provisioning PR. Only used
+# when regular-flavor's TAS check finds no nodes — i.e. a cold start.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: dws-flavor
+spec:
+  nodeLabels:
+    cloud.google.com/gke-nodepool: "gpu-dws-pool"
+  topologyName: node-topology
+  # No tolerations — see regular-flavor. Reuse opt-in lives on the Job.
+---
+# DWS queued-provisioning class. podSetUpdates injects the dynamic PR node
+# selector into pods ONLY when they are admitted via dws-flavor, so warm-reuse
+# pods (admitted via regular-flavor) are never pinned to a specific PR.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ProvisioningRequestConfig
+metadata:
+  name: dws-tas-prc
+spec:
+  provisioningClassName: queued-provisioning.gke.io
+  managedResources:
+  - nvidia.com/gpu
+  parameters:
+    maxRunDurationSeconds: "3600"
+  podSetUpdates:
+    nodeSelector:
+    - key: autoscaling.gke.io/provisioning-request
+      valueFromProvisioningClassDetail: ResizeRequestName
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: AdmissionCheck
+metadata:
+  name: dws-tas-check
+spec:
+  controllerName: kueue.x-k8s.io/provisioning-request
+  parameters:
+    apiGroup: kueue.x-k8s.io
+    kind: ProvisioningRequestConfig
+    name: dws-tas-prc
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: cluster-queue-tas
+spec:
+  namespaceSelector: {}
+  # The PR check applies ONLY to dws-flavor. regular-flavor admits with no check
+  # so warm reuse is instant.
+  admissionChecksStrategy:
+    admissionChecks:
+    - name: dws-tas-check
+      onFlavors: ["dws-flavor"]
+  resourceGroups:
+  - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+    flavors:
+    - name: regular-flavor      # 1st: reuse warm nodes, no PR
+      resources:
+      - name: "cpu"
+        nominalQuota: 100
+      - name: "memory"
+        nominalQuota: 400Gi
+      - name: "nvidia.com/gpu"
+        nominalQuota: 8
+    - name: dws-flavor          # 2nd: cold start → atomic DWS scale-up via PR
+      resources:
+      - name: "cpu"
+        nominalQuota: 100
+      - name: "memory"
+        nominalQuota: 400Gi
+      - name: "nvidia.com/gpu"
+        nominalQuota: 8
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: local-queue-tas
+  namespace: default
+spec:
+  clusterQueue: cluster-queue-tas

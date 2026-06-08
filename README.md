@@ -51,10 +51,12 @@ difference is observable.
 | `destroy.sh` | Tears down the cluster. |
 | `ccc.yaml` | The three-tier CCC. |
 | `kueue-config.yaml` | ResourceFlavors, ClusterQueue, AdmissionChecks. Also includes a separate experimental queue (`cluster-queue-flex-pr`) for PR-gated FSNQ. |
+| `kueue-config-tas.yaml` | TAS flavor-fallback scenario: `cluster-queue-tas` with `regular-flavor` → `dws-flavor` on the queued pool, for atomic provisioning + node reuse. |
 | `test-job.yaml` | Single 1-GPU job used by `test.sh`. |
 | `test.sh` | Single-job demo — shows which tier CCC selected. |
 | `test-reuse.sh` | Two-job demo — verifies warm-node reuse on the FSNQ pool. |
 | `test-flex-pr.sh` | Experiment — Kueue + ProvisioningRequest + reuse on FSNQ, using `best-effort-atomic-scale-up.autoscaling.x-k8s.io`. |
+| `test-tas-reuse.sh` | Atomic (queued) DWS + node reuse via a TAS flavor fallback. Cold start makes a PR; warm reuse skips it. |
 
 ## Prerequisites
 
@@ -68,12 +70,15 @@ difference is observable.
 PROJECT_ID=your-project ./deploy.sh    # ~10 min
 ./test.sh                              # CCC routing demo
 ./test-reuse.sh                        # warm-reuse demo on FSNQ
+./test-tas-reuse.sh                    # atomic DWS + reuse via TAS fallback
+./test-tas-reuse.sh dedicated          #   ...plus the reuse opt-out contrast
 ./destroy.sh                           # cleanup
 ```
 
 Overrides via env vars: `PROJECT_ID`, `CLUSTER_NAME`, `REGION`, `GPU_TYPE`,
 `MACHINE_TYPE`, `KUEUE_VERSION`. Defaults are `us-central1` / `nvidia-tesla-t4`
-/ `n1-standard-4` / Kueue `v0.10.0`.
+/ `n1-standard-4` / Kueue `v0.18.0`. The TAS reuse scenario needs Kueue
+`>= v0.14` (Topology Aware Scheduling on by default) and the `v1beta2` API.
 
 ## Warm reuse, with and without PR
 
@@ -90,6 +95,52 @@ warm node. The fix is to delete the Job after it completes — the cascade
 `Job → Workload → PR` releases the reservation. The script does this via
 `ttlSecondsAfterFinished: 0` on the Job spec, which is the pattern customers
 need in production batch pipelines if they want both Kueue + PR + reuse.
+
+## Atomic provisioning + reuse via a TAS flavor fallback
+
+`test-tas-reuse.sh` is the answer to the customer ask: keep DWS **queued**
+(atomic, gang-schedulable) provisioning, but stop trashing nodes between jobs.
+It uses `kueue-config-tas.yaml`, a separate queue (`cluster-queue-tas`) with two
+ResourceFlavors that both point at the **same** queued pool (`gpu-dws-pool`):
+
+```
+Job → cluster-queue-tas
+        ├─ regular-flavor   no admission check, TAS-enabled
+        │     If idle nodes are in Kueue's TAS cache → admit instantly, no PR.
+        │
+        └─ dws-flavor       PR check (queued-provisioning.gke.io), TAS-enabled
+              Cold start: regular-flavor's TAS check finds no node, Kueue falls
+              back here, creates a ProvisioningRequest, DWS scales up atomically.
+```
+
+Because **every** flavor in the queue is TAS-enabled (`topologyName` set), the
+ClusterQueue is "TAS-only" and Kueue implies TAS for every job — no
+`podset-*-topology` annotation is needed on the Job.
+
+The reuse opt-in is a single Job toleration. Kueue's TAS combines a podset's
+own tolerations with the flavor's, then excludes nodes whose taints aren't
+tolerated:
+
+- **With** `cloud.google.com/gke-queued` toleration → TAS counts the warm
+  queued node → `regular-flavor` admits → reuse, no PR.
+- **Without** it → the node's `gke-queued` taint is untolerated → `regular-flavor`
+  fails → fall back to `dws-flavor` → a fresh, dedicated scale-up.
+  (`test-tas-reuse.sh dedicated` demonstrates this contrast.)
+
+The flavors deliberately carry no tolerations of their own — otherwise the
+opt-out path could never trigger.
+
+On a cold start you will briefly see a `SecondPassFailed` /
+`no topology domains at level: kubernetes.io/hostname` warning on the workload:
+the PR became `Provisioned` but the new Node hasn't synced into Kueue's TAS
+cache yet. It is expected and self-recovering within ~5–10s.
+
+> **Fragmentation caveat:** reusing one pool across different job sizes can
+> strand capacity. If an 8-GPU gang job frees 8 nodes and a 1-GPU job grabs one,
+> the next 8-GPU gang job can't fit on the remaining 7 and falls back to a fresh
+> 8-node PR. Isolate very different job sizes into separate queues, or omit the
+> reuse toleration on large gang jobs so they always get dedicated atomic
+> provisioning.
 
 ## Known limitations
 

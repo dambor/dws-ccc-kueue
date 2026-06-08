@@ -107,7 +107,7 @@ gcloud container node-pools create gpu-dws-pool \
   --enable-queued-provisioning \
   --num-nodes=0 \
   --enable-autoscaling \
-  --total-max-nodes=1 \
+  --total-max-nodes=3 \
   --reservation-affinity=none \
   --node-locations="${GPU_ZONES}" \
   --node-labels=cloud.google.com/compute-class=ccc-dws,pool-type=ondemand
@@ -151,6 +151,7 @@ done
 echo "[6/6] Deploying CCC + Kueue + DWS resources..."
 kubectl apply -f ccc.yaml
 kubectl apply -f kueue-config.yaml
+kubectl apply -f kueue-config-tas.yaml
 
 echo ""
 echo "Deployment complete!"
