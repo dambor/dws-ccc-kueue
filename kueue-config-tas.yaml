@@ -52,7 +52,21 @@ spec:
   nodeLabels:
     cloud.google.com/gke-nodepool: "gpu-dws-pool"
   topologyName: node-topology
-  # No tolerations — see regular-flavor. Reuse opt-in lives on the Job.
+  # Tolerations ARE needed here (unlike regular-flavor): on a cold start Kueue
+  # generates the ProvisioningRequest's PodTemplate from this flavor. Without
+  # these, the PR pod doesn't tolerate the queued pool's taints, so the cluster
+  # autoscaler reports "No nodepool with QueuedProvisioning enabled is available"
+  # (NoQueuedNodepoolAvailable) and never scales up.
+  # regular-flavor stays toleration-free so the Job's gke-queued toleration
+  # remains the opt-in switch for reuse.
+  tolerations:
+  - key: cloud.google.com/gke-queued
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
 ---
 # DWS queued-provisioning class. podSetUpdates injects the dynamic PR node
 # selector into pods ONLY when they are admitted via dws-flavor, so warm-reuse
