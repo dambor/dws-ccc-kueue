@@ -83,6 +83,8 @@ metadata:
 spec:
   parallelism: 1
   completions: 1
+  ttlSecondsAfterFinished: 0   # cascades Workload → PR cleanup so the
+                               # autoscaler 10-min capacity reservation releases
   template:
     spec:
       nodeSelector:
@@ -181,9 +183,13 @@ ok "Submitted job-flex-pr-1"
 observe_job job-flex-pr-1 JOB1
 
 # ---------------------------------------------------------------------------
-header "Brief pause — node stays warm via 'balanced' autoscaler profile"
-step "Waiting 15s before submitting job 2..."
-sleep 15
+header "Release PR 1's capacity reservation (delete Job 1 → cascades to Workload → PR)"
+step "ttlSecondsAfterFinished=0 should auto-delete; waiting for PR 1 to be gone..."
+spin_until "PR 1 removed" "! kubectl get provisioningrequest -n default 2>/dev/null | grep -q job-flex-pr-1" 90
+ok "PR 1 cleanup complete — autoscaler capacity reservation released"
+
+step "Brief pause — node should still be warm (balanced profile, ~10 min idle)..."
+sleep 5
 
 # ---------------------------------------------------------------------------
 header "Job 2 — should produce a NEW PR; if best-effort-atomic recognizes warm capacity, PR provisions fast"
