@@ -47,10 +47,7 @@ gcloud container clusters create "${CLUSTER_NAME}" \
   --workload-pool="${PROJECT_ID}.svc.id.goog" \
   --autoscaling-profile=balanced \
   --no-enable-basic-auth \
-  --enable-private-nodes \
-  --enable-ip-alias \
-  --master-ipv4-cidr=172.16.0.0/28 \
-  --enable-private-endpoint
+  --enable-ip-alias
 
 echo "Fetching cluster credentials..."
 gcloud container clusters get-credentials "${CLUSTER_NAME}" \
