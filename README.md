@@ -51,7 +51,7 @@ difference is observable.
 | `destroy.sh` | Tears down the cluster. |
 | `ccc.yaml` | The three-tier CCC. |
 | `kueue-config.yaml` | ResourceFlavors, ClusterQueue, AdmissionChecks. Also includes a separate experimental queue (`cluster-queue-flex-pr`) for PR-gated FSNQ. |
-| `kueue-config-tas.yaml` | TAS flavor-fallback scenario: `cluster-queue-tas` with `regular-flavor` → `dws-flavor` on the queued pool, for atomic provisioning + node reuse. |
+| `kueue-config-tas.yaml` | TAS flavor-fallback scenario: `default-cq` with `regular-flavor` → `dws-flavor` on the queued pool, for atomic provisioning + node reuse. Implements the pattern from the [Node reuse for DWS FS-Queued](https://docs.google.com/document/d/node-reuse-dws-fs-queued) guide. |
 | `test-job.yaml` | Single 1-GPU job used by `test.sh`. |
 | `test.sh` | Single-job demo — shows which tier CCC selected. |
 | `test-reuse.sh` | Two-job demo — verifies warm-node reuse on the FSNQ pool. |
@@ -98,17 +98,21 @@ need in production batch pipelines if they want both Kueue + PR + reuse.
 
 ## Atomic provisioning + reuse via a TAS flavor fallback
 
-`test-tas-reuse.sh` is the answer to the customer ask: keep DWS **queued**
-(atomic, gang-schedulable) provisioning, but stop trashing nodes between jobs.
-It uses `kueue-config-tas.yaml`, a separate queue (`cluster-queue-tas`) with two
-ResourceFlavors that both point at the **same** queued pool (`gpu-dws-pool`):
+This pattern implements the approach described in the
+**"Stop Trashing Nodes: Combining Atomic Provisioning with Node Reuse in GKE"**
+guide. It keeps DWS **queued** (atomic, gang-schedulable) provisioning while
+allowing subsequent jobs to run immediately on idle infrastructure.
+
+`test-tas-reuse.sh` demos this end-to-end. It uses `kueue-config-tas.yaml`, a
+queue (`default-cq`) with two ResourceFlavors that both point at the **same**
+queued pool (`gpu-dws-pool`):
 
 ```
-Job → cluster-queue-tas
+Job → default-cq
         ├─ regular-flavor   no admission check, TAS-enabled
         │     If idle nodes are in Kueue's TAS cache → admit instantly, no PR.
         │
-        └─ dws-flavor       PR check (queued-provisioning.gke.io), TAS-enabled
+        └─ dws-flavor       dws-provisioning-check (queued-provisioning.gke.io), TAS-enabled
               Cold start: regular-flavor's TAS check finds no node, Kueue falls
               back here, creates a ProvisioningRequest, DWS scales up atomically.
 ```
@@ -117,18 +121,13 @@ Because **every** flavor in the queue is TAS-enabled (`topologyName` set), the
 ClusterQueue is "TAS-only" and Kueue implies TAS for every job — no
 `podset-*-topology` annotation is needed on the Job.
 
-The reuse opt-in is a single Job toleration. Kueue's TAS combines a podset's
-own tolerations with the flavor's, then excludes nodes whose taints aren't
-tolerated:
+The reuse opt-in is a single Job toleration:
 
 - **With** `cloud.google.com/gke-queued` toleration → TAS counts the warm
   queued node → `regular-flavor` admits → reuse, no PR.
 - **Without** it → the node's `gke-queued` taint is untolerated → `regular-flavor`
   fails → fall back to `dws-flavor` → a fresh, dedicated scale-up.
   (`test-tas-reuse.sh dedicated` demonstrates this contrast.)
-
-The flavors deliberately carry no tolerations of their own — otherwise the
-opt-out path could never trigger.
 
 On a cold start you will briefly see a `SecondPassFailed` /
 `no topology domains at level: kubernetes.io/hostname` warning on the workload:

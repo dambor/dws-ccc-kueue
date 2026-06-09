@@ -1,6 +1,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Scenario: "Stop Trashing Nodes" — atomic provisioning + node reuse via a
-# TAS-enabled flavor fallback (Kueue Topology Aware Scheduling).
+# Stop Trashing Nodes: Combining Atomic Provisioning with Node Reuse in GKE
+#
+# This configuration implements the TAS-enabled flavor fallback pattern from
+# the "Node reuse for DWS FS-Queued" guide. It allows subsequent jobs to run
+# immediately on idle infrastructure provisioned by previous DWS Flex-start
+# Queued workloads, eliminating redundant scale-ups.
 #
 # Both flavors point at the SAME queued-provisioning pool (gpu-dws-pool).
 #   • regular-flavor — no admission check. If idle/warm nodes already exist,
@@ -9,20 +13,28 @@
 #     Used only when the TAS check for regular-flavor fails (empty cluster),
 #     triggering an atomic DWS scale-up.
 #
-# Because EVERY flavor in cluster-queue-tas is TAS-enabled (topologyName set),
+# Because EVERY flavor in default-cq is TAS-enabled (topologyName set),
 # the ClusterQueue is "TAS-only" and Kueue implies TAS for every workload —
-# jobs need NO topology annotation (see flavorassigner.isTASImplied).
+# jobs need NO topology annotation.
 #
-# Requires Kueue >= v0.14 (TopologyAwareScheduling is beta/on-by-default) and
-# the v1beta2 API (podSetUpdates, ResourceFlavor.topologyName). deploy.sh pins
-# v0.18.0, which satisfies both.
+# User opt-in for reuse:
+#   • WITH cloud.google.com/gke-queued toleration → TAS counts the warm
+#     queued node → regular-flavor admits → reuse, no PR.
+#   • WITHOUT it → the node's gke-queued taint is untolerated →
+#     regular-flavor fails → fall back to dws-flavor → fresh dedicated PR.
+#
+# Requires Kueue >= v0.14 (TopologyAwareScheduling beta/on-by-default) and
+# the v1beta2 API. deploy.sh pins v0.18.0, which satisfies both.
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Topology Definition
+# Defines the topology levels Kueue should track. For simple node reuse,
+# tracking at the hostname (node) level is sufficient.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: Topology
 metadata:
-  name: node-topology
+  name: "default"
 spec:
-  # Node-level reuse only needs the hostname level.
   levels:
   - nodeLabel: "kubernetes.io/hostname"
 ---
@@ -31,34 +43,34 @@ spec:
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
-  name: regular-flavor
+  name: "regular-flavor"
 spec:
   nodeLabels:
-    cloud.google.com/gke-nodepool: "gpu-dws-pool"
-  topologyName: node-topology
-  # NOTE: no tolerations here on purpose. Kueue's TAS combines a podset's own
-  # tolerations with the flavor's, then excludes nodes whose taints aren't
-  # tolerated (tas_flavor_snapshot: FindMatchingUntoleratedTaint). Keeping the
-  # flavor toleration-free makes the JOB's cloud.google.com/gke-queued
-  # toleration the opt-in switch for reusing warm queued nodes.
+    cloud.google.com/compute-class: "ccc-dws"
+    pool-type: "ondemand"
+  topologyName: "default"
+  tolerations:
+  - key: cloud.google.com/compute-class
+    operator: Equal
+    value: "ccc-dws"
+    effect: NoSchedule
 ---
 # Fallback flavor: same pool, but gated by a queued-provisioning PR. Only used
 # when regular-flavor's TAS check finds no nodes — i.e. a cold start.
+# NOTE: tolerations are required here so the PR's PodTemplate can match the
+# queued pool's taints. Without them, the autoscaler reports
+# "No nodepool with QueuedProvisioning enabled is available for scale up".
+# regular-flavor stays toleration-free so the Job's gke-queued toleration
+# remains the opt-in switch for reuse.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
-  name: dws-flavor
+  name: "dws-flavor"
 spec:
   nodeLabels:
-    cloud.google.com/gke-nodepool: "gpu-dws-pool"
-  topologyName: node-topology
-  # Tolerations ARE needed here (unlike regular-flavor): on a cold start Kueue
-  # generates the ProvisioningRequest's PodTemplate from this flavor. Without
-  # these, the PR pod doesn't tolerate the queued pool's taints, so the cluster
-  # autoscaler reports "No nodepool with QueuedProvisioning enabled is available"
-  # (NoQueuedNodepoolAvailable) and never scales up.
-  # regular-flavor stays toleration-free so the Job's gke-queued toleration
-  # remains the opt-in switch for reuse.
+    cloud.google.com/compute-class: "ccc-dws"
+    pool-type: "ondemand"
+  topologyName: "default"
   tolerations:
   - key: cloud.google.com/gke-queued
     operator: Equal
@@ -67,72 +79,72 @@ spec:
   - key: nvidia.com/gpu
     operator: Exists
     effect: NoSchedule
+  - key: cloud.google.com/compute-class
+    operator: Equal
+    value: "ccc-dws"
+    effect: NoSchedule
 ---
-# DWS queued-provisioning class. podSetUpdates injects the dynamic PR node
+# Provisioning Request Configuration
+# Defines the DWS provisioning class. podSetUpdates injects the dynamic PR node
 # selector into pods ONLY when they are admitted via dws-flavor, so warm-reuse
 # pods (admitted via regular-flavor) are never pinned to a specific PR.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ProvisioningRequestConfig
 metadata:
-  name: dws-tas-prc
+  name: dws-config
 spec:
   provisioningClassName: queued-provisioning.gke.io
-  managedResources:
-  - nvidia.com/gpu
-  parameters:
-    maxRunDurationSeconds: "3600"
   podSetUpdates:
     nodeSelector:
     - key: autoscaling.gke.io/provisioning-request
       valueFromProvisioningClassDetail: ResizeRequestName
+  managedResources:
+  - nvidia.com/gpu
 ---
+# Admission Check
+# Links dws-flavor to the Provisioning Request controller.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: AdmissionCheck
 metadata:
-  name: dws-tas-check
+  name: dws-provisioning-check
 spec:
   controllerName: kueue.x-k8s.io/provisioning-request
   parameters:
     apiGroup: kueue.x-k8s.io
     kind: ProvisioningRequestConfig
-    name: dws-tas-prc
+    name: dws-config
 ---
+# ClusterQueue and LocalQueue
+# regular-flavor first, falling back to dws-flavor if needed. The PR check
+# applies ONLY to dws-flavor. regular-flavor admits with no check so warm
+# reuse is instant.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
-  name: cluster-queue-tas
+  name: default-cq
 spec:
   namespaceSelector: {}
-  # The PR check applies ONLY to dws-flavor. regular-flavor admits with no check
-  # so warm reuse is instant.
   admissionChecksStrategy:
     admissionChecks:
-    - name: dws-tas-check
-      onFlavors: ["dws-flavor"]
+    - name: dws-provisioning-check
+      onFlavors:
+      - dws-flavor
   resourceGroups:
-  - coveredResources: ["cpu", "memory", "nvidia.com/gpu"]
+  - coveredResources: ["nvidia.com/gpu"]
     flavors:
-    - name: regular-flavor      # 1st: reuse warm nodes, no PR
+    - name: regular-flavor
       resources:
-      - name: "cpu"
-        nominalQuota: 100
-      - name: "memory"
-        nominalQuota: 400Gi
       - name: "nvidia.com/gpu"
-        nominalQuota: 8
-    - name: dws-flavor          # 2nd: cold start → atomic DWS scale-up via PR
+        nominalQuota: 1000
+    - name: dws-flavor
       resources:
-      - name: "cpu"
-        nominalQuota: 100
-      - name: "memory"
-        nominalQuota: 400Gi
       - name: "nvidia.com/gpu"
-        nominalQuota: 8
+        nominalQuota: 1000
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:
-  name: local-queue-tas
   namespace: default
+  name: default-lq
 spec:
-  clusterQueue: cluster-queue-tas
+  clusterQueue: default-cq

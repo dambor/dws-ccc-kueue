@@ -12,7 +12,7 @@ set -e
 #
 # Scenario: "Stop Trashing Nodes" — combining DWS atomic (queued) provisioning
 # with node reuse using a TAS-enabled flavor fallback in Kueue.
-#   • cluster-queue-tas has two flavors on the SAME pool (gpu-dws-pool):
+#   • default-cq has two flavors on the SAME pool (gpu-dws-pool):
 #       regular-flavor (no check)  → reuse warm nodes instantly, no PR
 #       dws-flavor    (PR check)   → cold-start atomic DWS scale-up
 #   • Both flavors are TAS-enabled, so the queue is TAS-only and Kueue implies
@@ -111,12 +111,12 @@ preflight() {
     fail "Can't find ${TAS_CONFIG} — run this script from inside the repo checkout."
   fi
   kubectl apply -f "${TAS_CONFIG}" >/dev/null
-  ok "Applied Topology, regular-flavor/dws-flavor, PRC, admission check, cluster-queue-tas, local-queue-tas"
+  ok "Applied Topology, regular-flavor/dws-flavor, PRC, admission check, default-cq, default-lq"
 
-  spin_until "cluster-queue-tas active" \
-    "kubectl get clusterqueue cluster-queue-tas -o jsonpath='{.status.conditions[?(@.type==\"Active\")].status}' | grep -q True" 60
-  spin_until "local-queue-tas active" \
-    "kubectl get localqueue local-queue-tas -n default -o jsonpath='{.status.conditions[?(@.type==\"Active\")].status}' | grep -q True" 60
+  spin_until "default-cq active" \
+    "kubectl get clusterqueue default-cq -o jsonpath='{.status.conditions[?(@.type==\"Active\")].status}' | grep -q True" 60
+  spin_until "default-lq active" \
+    "kubectl get localqueue default-lq -n default -o jsonpath='{.status.conditions[?(@.type==\"Active\")].status}' | grep -q True" 60
 
   # The queued pool can sit at 0 nodes; we can't list it via Node objects then.
   # Just remind about capacity for the optional dedicated phase.
@@ -144,28 +144,29 @@ metadata:
   name: ${name}
   namespace: default
   labels:
-    kueue.x-k8s.io/queue-name: local-queue-tas
+    kueue.x-k8s.io/queue-name: default-lq
 spec:
   parallelism: 1
   completions: 1
   template:
     spec:
       nodeSelector:
-        cloud.google.com/gke-nodepool: gpu-dws-pool
+        cloud.google.com/compute-class: ccc-dws
+        pool-type: ondemand
       containers:
-      - name: dummy-ml-workload
-        image: registry.k8s.io/e2e-test-images/agnhost:2.53
-        args: ["pause"]
+      - name: dummy-job
+        image: ubuntu
+        command: ["sleep", "30"]
         resources:
-          requests:
-            cpu: "1"
-            memory: "1Gi"
-            nvidia.com/gpu: "1"
           limits:
             nvidia.com/gpu: "1"
       tolerations:
       - key: nvidia.com/gpu
         operator: Exists
+        effect: NoSchedule
+      - key: cloud.google.com/compute-class
+        operator: Equal
+        value: ccc-dws
         effect: NoSchedule
 ${queued_tol}
       restartPolicy: Never
@@ -188,7 +189,7 @@ observe_job() {
 
   local flavor
   flavor=$(kubectl get workload "${wl}" -n default \
-    -o jsonpath='{.status.admission.podSetAssignments[0].flavors.cpu}' 2>/dev/null || echo unknown)
+    -o jsonpath='{.status.admission.podSetAssignments[0].flavors.nvidia\.com/gpu}' 2>/dev/null || echo unknown)
   echo -e "  ${BOLD}${ARROW} Flavor:  ${BG_YELLOW}${WHITE} ${flavor} ${RESET}"
 
   # Did Kueue create a ProvisioningRequest for this job?
@@ -207,9 +208,9 @@ observe_job() {
   echo -e "  ${BOLD}${ARROW} Node:    ${BG_YELLOW}${WHITE} ${node} ${RESET}"
   echo -e "  ${BOLD}${ARROW} Admitted in: ${BG_YELLOW}${WHITE} $(elapsed "${t0}") ${RESET}"
 
-  declare -g "${label}_FLAVOR=${flavor}"
-  declare -g "${label}_NODE=${node}"
-  declare -g "${label}_PR=${pr}"
+  eval "${label}_FLAVOR=\"\${flavor}\""
+  eval "${label}_NODE=\"\${node}\""
+  eval "${label}_PR=\"\${pr}\""
 }
 
 # ---------------------------------------------------------------------------
@@ -220,7 +221,7 @@ echo "  ╔═══════════════════════
 echo "  ║  Atomic DWS provisioning + node reuse via TAS flavor fallback   ║"
 echo "  ╚════════════════════════════════════════════════════════════════╝"
 echo -e "${RESET}"
-echo -e "  ${DIM}Queue:    local-queue-tas  (regular-flavor → dws-flavor fallback)${RESET}"
+echo -e "  ${DIM}Queue:    default-lq  (regular-flavor → dws-flavor fallback)${RESET}"
 echo -e "  ${DIM}Pool:     gpu-dws-pool  (--enable-queued-provisioning, atomic)${RESET}"
 echo -e "  ${DIM}Reuse:    job carries cloud.google.com/gke-queued toleration${RESET}"
 

@@ -73,7 +73,8 @@ gcloud container node-pools create gpu-dws-spot-pool \
   --enable-autoscaling \
   --total-max-nodes=1 \
   --node-locations="${GPU_ZONES}" \
-  --node-labels=cloud.google.com/compute-class=ccc-dws,pool-type=spot
+  --node-labels=cloud.google.com/compute-class=ccc-dws,pool-type=spot \
+  --node-taints=nvidia.com/gpu=present:NoSchedule,cloud.google.com/compute-class=ccc-dws:NoSchedule
 
 # Flex-start (NON-queued) pool — CCC prioridade 2; DWS Flex pricing + node recycling
 # across workloads (supports reuse). No ProvisioningRequest, no gang-scheduling.
@@ -91,7 +92,8 @@ gcloud container node-pools create gpu-dws-flex-pool \
   --location-policy=ANY \
   --reservation-affinity=none \
   --node-locations="${GPU_ZONES}" \
-  --node-labels=cloud.google.com/compute-class=ccc-dws,pool-type=flex
+  --node-labels=cloud.google.com/compute-class=ccc-dws,pool-type=flex \
+  --node-taints=nvidia.com/gpu=present:NoSchedule,cloud.google.com/compute-class=ccc-dws:NoSchedule
 
 # On-demand pool — CCC prioridade 3; DWS Flex + queued provisioning para gang-scheduling
 # (multi-node atomic). NÃO reusa nós entre workloads (PR per-workload).
@@ -107,7 +109,8 @@ gcloud container node-pools create gpu-dws-pool \
   --total-max-nodes=3 \
   --reservation-affinity=none \
   --node-locations="${GPU_ZONES}" \
-  --node-labels=cloud.google.com/compute-class=ccc-dws,pool-type=ondemand
+  --node-labels=cloud.google.com/compute-class=ccc-dws,pool-type=ondemand \
+  --node-taints=nvidia.com/gpu=present:NoSchedule,cloud.google.com/gke-queued=true:NoSchedule,cloud.google.com/compute-class=ccc-dws:NoSchedule
 
 # ---------------------------------------------------------------------------
 # 5. Kueue
@@ -155,5 +158,7 @@ echo "Deployment complete!"
 kubectl get computeclass ccc-dws
 kubectl get clusterqueue cluster-queue-dws
 kubectl get localqueue local-queue-dws
+kubectl get clusterqueue default-cq
+kubectl get localqueue default-lq
 echo ""
 echo "Run ./test.sh to execute the end-to-end integration test."
